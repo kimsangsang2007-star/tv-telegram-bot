@@ -26,9 +26,8 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-# ទាញយក Environment Variables ពី Render
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-CHAT_ID = os.getenv("CHAT_ID", "")
+BOT_TOKEN = "8729899940:AAHTLEpOI1pVK0yExlPIfun9R0hbtU0mlvQ"
+CHAT_ID = "-1004327947082"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
 
 SYMBOL_NAME = "XAUUSD (Gold)"
