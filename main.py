@@ -1,14 +1,21 @@
 import os
-importt time
+import time
 import json
 import logging
 import requests
 import threading
 import numpy as np
 import pandas as pd
-import MetaTrader5 as mt5  # ភ្ជាប់ MT5 API
 from typing import Dict, Optional, Any, Tuple, List
 from datetime import datetime, timezone, timedelta
+from flask import Flask
+
+# Optional MT5 import (MT5 works natively on Windows only)
+try:
+    import MetaTrader5 as mt5
+    MT5_AVAILABLE = True
+except ImportError:
+    MT5_AVAILABLE = False
 
 # ==========================================
 # 1. LOGGING & CONFIGURATION SETUP
@@ -19,48 +26,66 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-# ទាញយក Token ចេញពី Environment Variable លើ Render ដោយសុវត្ថិភាព
-TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN")
-GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"
+# ទាញយក Environment Variables ពី Render
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+CHAT_ID = os.getenv("CHAT_ID", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
 
 SYMBOL_NAME = "XAUUSD (Gold)"
-# កែប្រែ Ticker មកប្រើប្រាស់ Symbol របស់ MT5
-YFINANCE_TICKER = "XAUUSD"        # MT5 Gold Symbol (អាចជា XAUUSD, XAUUSD.m, XAUUSDm អាស្រ័យលើ Broker)
-SILVER_TICKER = "XAGUSD"          # MT5 Silver Symbol សម្រាប់វិភាគ SMT Divergence
-CHECK_INTERVAL_SECONDS = 10       # Scan interval
-NEWS_BUFFER_MINUTES = 30          # Block signals 30m before/after High Impact News
+YFINANCE_TICKER = "XAUUSD"
+SILVER_TICKER = "XAGUSD"
+CHECK_INTERVAL_SECONDS = 10
+NEWS_BUFFER_MINUTES = 30
 
 # Institutional Risk Settings
-ACCOUNT_BALANCE = 10000.0        # USD Account Balance
-RISK_PER_TRADE_PCT = 0.01        # 1% Risk per trade
-MAX_DAILY_LOSS_PCT = 0.03        # 3% Max Daily Drawdown
-MIN_PROBABILITY_SCORE = 60       # Min Score to trigger signal
+ACCOUNT_BALANCE = 10000.0
+RISK_PER_TRADE_PCT = 0.01
+MAX_DAILY_LOSS_PCT = 0.03
+MIN_PROBABILITY_SCORE = 60
 
 last_processed_signal_id: Optional[str] = None
 last_update_id: int = 0
 indicator_cache: Dict[str, Tuple[datetime, pd.DataFrame]] = {}
 cache_lock = threading.Lock()
 
+# ==========================================
+# 2. FLASK SERVER FOR RENDER & UPTIMEROBOT
+# ==========================================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is alive and running!", 200
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
 
 # ==========================================
-# METATRADER 5 INITIALIZATION
+# 3. METATRADER 5 INITIALIZATION
 # ==========================================
 def init_mt5_connection() -> bool:
     """ពិនិត្យ និងភ្ជាប់ទៅកាន់ MetaTrader 5 Terminal"""
+    if not MT5_AVAILABLE:
+        logging.warning("⚠️ MetaTrader5 module is not available on this OS platform.")
+        return False
     if not mt5.initialize():
         logging.error(f"❌ MT5 Initialization Failed! Error: {mt5.last_error()}")
         return False
     logging.info("✅ MetaTrader5 Terminal Connected Successfully!")
     return True
 
-
 # ==========================================
-# 2. STANDARDIZED SIGNAL BUILDER (PREVENTS KEYERRORS)
+# 4. STANDARDIZED SIGNAL BUILDER
 # ==========================================
 def create_standard_signal(
     status: str = "OK",
-    signal_type: str = "WAIT",      # BUY NOW, SELL NOW, WAIT BUY ZONE, WAIT SELL ZONE, WAIT, NO TRADE
-    action: str = "WAIT",           # BUY, SELL, WAIT
+    signal_type: str = "WAIT",
+    action: str = "WAIT",
     price: float = 0.0,
     score: float = 0.0,
     entry_zone_high: float = 0.0,
@@ -184,9 +209,8 @@ def create_standard_signal(
         "structure_stop": round(float(structure_stop), 2),
     }
 
-
 # ==========================================
-# 3. PERFORMANCE & TRADE LOGGER
+# 5. PERFORMANCE & TRADE LOGGER
 # ==========================================
 class PerformanceTracker:
     FILE_PATH = "trade_journal.json"
@@ -261,9 +285,8 @@ class PerformanceTracker:
             "net_profit": round(gross_profit - gross_loss, 2)
         }
 
-
 # ==========================================
-# 4. NEWS FILTER MODULE
+# 6. NEWS FILTER MODULE
 # ==========================================
 class NewsFilter:
     @staticmethod
@@ -300,30 +323,23 @@ class NewsFilter:
             logging.debug(f"News check bypass: {e}")
             return False, "🟢 News Check bypassed (Server unavailable)"
 
-
 # ==========================================
-# 5. METATRADER5 DATA FETCHING & INDICATORS
+# 7. METATRADER5 / SAFE DATA FETCHING & INDICATORS
 # ==========================================
 def fetch_ohlcv_safe(ticker: str, interval: str, range_: str) -> pd.DataFrame:
-    """
-    កែប្រែមកប្រើប្រាស់ MetaTrader5 Python API ដោយផ្ទាល់
-    ទាញយក Rates (OHLCV) ពី MT5 Terminal
-    """
     cache_key = f"{ticker}_{interval}_{range_}"
     now = datetime.now(timezone.utc)
     
     with cache_lock:
         if cache_key in indicator_cache:
             cached_time, cached_df = indicator_cache[cache_key]
-            if (now - cached_time).total_seconds() < 5:  # Cache 5s សម្រាប់រហ័សទាន់ចិត្ត
+            if (now - cached_time).total_seconds() < 5:
                 return cached_df.copy()
 
-    # ពិនិត្យការភ្ជាប់ MT5
-    if not mt5.initialize():
-        logging.error("⚠️ MT5 connection failed in fetch_ohlcv_safe!")
+    if not MT5_AVAILABLE or not mt5.initialize():
+        logging.warning(f"⚠️ MT5 unavailable. Skipping fetch for {ticker}.")
         return pd.DataFrame()
 
-    # ការកំណត់ Mapping Timeframes រវាង String និង MT5 Constants
     tf_map = {
         "1m": mt5.TIMEFRAME_M1,
         "5m": mt5.TIMEFRAME_M5,
@@ -335,7 +351,6 @@ def fetch_ohlcv_safe(ticker: str, interval: str, range_: str) -> pd.DataFrame:
         "1w": mt5.TIMEFRAME_W1
     }
 
-    # Mapping ចំនួន Bars ដែលត្រូវទាញយក
     bars_count_map = {
         "1d": 300,
         "5d": 1000,
@@ -346,9 +361,7 @@ def fetch_ohlcv_safe(ticker: str, interval: str, range_: str) -> pd.DataFrame:
     mt5_tf = tf_map.get(interval, mt5.TIMEFRAME_M5)
     num_bars = bars_count_map.get(range_, 500)
 
-    # ផ្ទៀងផ្ទាត់ និងជ្រើសរើស Symbol ក្នុង MT5 Market Watch
     if not mt5.symbol_select(ticker, True):
-        # ប្រសិនបើ Broker ប្រើឈ្មោះផ្សេង ស្វែងរក Symbol ដែលមាន XAU
         all_symbols = mt5.symbols_get()
         matched_symbol = None
         if all_symbols:
@@ -360,16 +373,14 @@ def fetch_ohlcv_safe(ticker: str, interval: str, range_: str) -> pd.DataFrame:
         if matched_symbol:
             ticker = matched_symbol
         else:
-            logging.warning(f"⚠️ Symbol {ticker} មិនមាននៅលើ MT5 Market Watch!")
+            logging.warning(f"⚠️ Symbol {ticker} not found on MT5 Market Watch!")
             return pd.DataFrame()
 
-    # ទាញយកទិន្នន័យពី MT5
     rates = mt5.copy_rates_from_pos(ticker, mt5_tf, 0, num_bars)
     if rates is None or len(rates) == 0:
-        logging.warning(f"⚠️ ពុំមានទិន្នន័យពី MT5 សម្រាប់ {ticker} ({interval})")
+        logging.warning(f"⚠️ No data returned from MT5 for {ticker} ({interval})")
         return pd.DataFrame()
 
-    # រៀបចំទិន្នន័យចូល DataFrame ឱ្យស្របតាម Standard Structure
     df = pd.DataFrame(rates)
     df['datetime'] = pd.to_datetime(df['time'], unit='s', utc=True)
     df.rename(columns={'tick_volume': 'volume'}, inplace=True)
@@ -416,9 +427,8 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-
 # ==========================================
-# 6. ENHANCED MARKET STRUCTURE ENGINE
+# 8. MARKET STRUCTURE ENGINE
 # ==========================================
 class MarketStructureEngine:
     @staticmethod
@@ -493,9 +503,8 @@ class MarketStructureEngine:
             "last_ll": round(last_ll, 2)
         }
 
-
 # ==========================================
-# 7. ENHANCED LIQUIDITY ENGINE
+# 9. LIQUIDITY ENGINE
 # ==========================================
 class LiquidityEngine:
     @staticmethod
@@ -542,9 +551,8 @@ class LiquidityEngine:
             "liquidity_void": liquidity_void
         }
 
-
 # ==========================================
-# 8. ENHANCED ORDER BLOCK ENGINE
+# 10. ORDER BLOCK ENGINE
 # ==========================================
 class OrderBlockEngine:
     @staticmethod
@@ -615,9 +623,8 @@ class OrderBlockEngine:
             "mitigation_block": mitigation_block
         }
 
-
 # ==========================================
-# 9. ENHANCED FAIR VALUE GAP ENGINE
+# 11. FAIR VALUE GAP ENGINE
 # ==========================================
 class FVGEngine:
     @staticmethod
@@ -671,9 +678,8 @@ class FVGEngine:
             "bpr": None
         }
 
-
 # ==========================================
-# 10. SESSION & OTE & SMT ENGINES
+# 12. SESSION & OTE & SMT ENGINES
 # ==========================================
 class SessionModel:
     @staticmethod
@@ -703,7 +709,6 @@ class SessionModel:
             "session_phase": "EXPANSION" if is_killzone else "ACCUMULATION"
         }
 
-
 class PremiumDiscountEngine:
     @staticmethod
     def calculate_array(df: pd.DataFrame) -> Dict[str, Any]:
@@ -723,7 +728,6 @@ class PremiumDiscountEngine:
             "equilibrium": round(equilibrium, 2),
             "price_location": price_location
         }
-
 
 class OTEEngine:
     @staticmethod
@@ -764,7 +768,6 @@ class OTEEngine:
 
         return {"ote_zone": "N/A", "ote_level": 0.0, "ote_score": 0.0, "type": "NONE"}
 
-
 class SMTEngine:
     @staticmethod
     def check_smt(df_gold: pd.DataFrame) -> Dict[str, Any]:
@@ -789,9 +792,8 @@ class SMTEngine:
         except Exception:
             return {"smt_signal": "NONE", "smt_strength": 0.0}
 
-
 # ==========================================
-# 11. MARKET NARRATIVE ENGINE
+# 13. MARKET NARRATIVE ENGINE
 # ==========================================
 class MarketNarrativeEngine:
     @staticmethod
@@ -829,9 +831,8 @@ class MarketNarrativeEngine:
             "liquidity_draw": "BSL" if h1_bias == "BULLISH" else "SSL"
         }
 
-
 # ==========================================
-# 12. UNIFIED STRATEGY EVALUATOR
+# 14. UNIFIED STRATEGY EVALUATOR
 # ==========================================
 class ICTStrategyEvaluator:
     @staticmethod
@@ -1020,9 +1021,8 @@ class ICTStrategyEvaluator:
             structure_stop=sl_pips
         )
 
-
 # ==========================================
-# 13. UNIFIED BACKTESTER
+# 15. UNIFIED BACKTESTER
 # ==========================================
 class UnifiedBacktester:
     def __init__(self, df_m5: pd.DataFrame, df_h1: pd.DataFrame):
@@ -1084,9 +1084,8 @@ class UnifiedBacktester:
             "final_balance": round(balance, 2)
         }
 
-
 # ==========================================
-# 14. TELEGRAM MESSAGE FORMATTER & AI NARRATIVE
+# 16. TELEGRAM MESSAGE FORMATTER & AI NARRATIVE
 # ==========================================
 def generate_ai_analysis(data: Dict[str, Any]) -> str:
     reasons_str = ", ".join(data.get('reasons', [])) if data.get('reasons') else "Structure Shift"
@@ -1117,7 +1116,6 @@ def generate_ai_analysis(data: Dict[str, Any]) -> str:
         f"• * Market Location:* `{data.get('price_location')}` Zone\n"
         f"💡 *កត្តាតភ្ជាប់ (Reasons):* `{reasons_str}`"
     )
-
 
 def format_signal_output(signal: Dict[str, Any], ai_commentary: str) -> str:
     reasons_list = "\n".join([f"  • {r}" for r in signal.get("reasons", [])])
@@ -1166,8 +1164,11 @@ def format_signal_output(signal: Dict[str, Any], ai_commentary: str) -> str:
         f"⏰ *Time:* {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
     )
 
-
 def send_telegram_msg_with_button(chat_id_target: str, text: str) -> bool:
+    if not BOT_TOKEN:
+        logging.error("BOT_TOKEN is missing!")
+        return False
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     reply_markup = {
         "inline_keyboard": [
@@ -1189,17 +1190,17 @@ def send_telegram_msg_with_button(chat_id_target: str, text: str) -> bool:
         logging.error(f"Telegram Send Error: {e}")
         return False
 
-
 def answer_callback_query(callback_query_id: str, text: str = "Processing..."):
+    if not BOT_TOKEN:
+        return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
     try:
         requests.post(url, json={"callback_query_id": callback_query_id, "text": text}, timeout=5)
     except Exception as e:
         logging.warning(f"Callback error: {e}")
 
-
 # ==========================================
-# 15. BOT HANDLERS & BOT CYCLE EXECUTION
+# 17. BOT HANDLERS & BOT CYCLE EXECUTION
 # ==========================================
 def trigger_instant_analysis(target_chat_id: str):
     df_h1 = fetch_ohlcv_safe(YFINANCE_TICKER, interval="1h", range_="7d")
@@ -1207,7 +1208,7 @@ def trigger_instant_analysis(target_chat_id: str):
     df_m5 = fetch_ohlcv_safe(YFINANCE_TICKER, interval="5m", range_="1d")
 
     if df_h1.empty or df_m15.empty or df_m5.empty:
-        send_telegram_msg_with_button(target_chat_id, "⚠️ Failed to fetch MT5 market data!")
+        send_telegram_msg_with_button(target_chat_id, "⚠️ Failed to fetch market data!")
         return
 
     df_h1 = add_indicators(df_h1)
@@ -1220,13 +1221,12 @@ def trigger_instant_analysis(target_chat_id: str):
     msg = format_signal_output(signal, ai_commentary)
     send_telegram_msg_with_button(target_chat_id, msg)
 
-
 def trigger_backtest_report(target_chat_id: str):
     df_m5 = fetch_ohlcv_safe(YFINANCE_TICKER, interval="5m", range_="5d")
     df_h1 = fetch_ohlcv_safe(YFINANCE_TICKER, interval="1h", range_="14d")
     
     if df_m5.empty or df_h1.empty:
-        send_telegram_msg_with_button(target_chat_id, "⚠️ Backtest MT5 data unavailable!")
+        send_telegram_msg_with_button(target_chat_id, "⚠️ Backtest data unavailable!")
         return
         
     backtester = UnifiedBacktester(df_m5, df_h1)
@@ -1241,7 +1241,6 @@ def trigger_backtest_report(target_chat_id: str):
         f"━━━━━━━━━━━━━━━━━━━"
     )
     send_telegram_msg_with_button(target_chat_id, msg)
-
 
 def trigger_journal_report(target_chat_id: str):
     report = PerformanceTracker.generate_report(30)
@@ -1261,12 +1260,15 @@ def trigger_journal_report(target_chat_id: str):
     )
     send_telegram_msg_with_button(target_chat_id, msg)
 
-
 def telegram_poll_listener():
     global last_update_id
     logging.info("🎧 Telegram Listener Thread Active...")
 
     while True:
+        if not BOT_TOKEN:
+            time.sleep(10)
+            continue
+
         try:
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={last_update_id + 1}&timeout=20"
             res = requests.get(url, timeout=25)
@@ -1282,7 +1284,7 @@ def telegram_poll_listener():
                         sender_chat_id = str(cb.get("message", {}).get("chat", {}).get("id", CHAT_ID))
                         
                         if cb_data == "btn_analyze_now":
-                            answer_callback_query(cb["id"], "🧠 Scanning MT5 Market Structure...")
+                            answer_callback_query(cb["id"], "🧠 Scanning Market Structure...")
                             trigger_instant_analysis(sender_chat_id)
                         elif cb_data == "btn_backtest_now":
                             answer_callback_query(cb["id"], "📈 Running Backtest...")
@@ -1305,11 +1307,10 @@ def telegram_poll_listener():
         except Exception as e:
             time.sleep(5)
 
-
 def run_bot_cycle():
     global last_processed_signal_id
 
-    logging.info("🔄 Running Scheduled Market Scan via MT5...")
+    logging.info("🔄 Running Scheduled Market Scan...")
     df_h1 = fetch_ohlcv_safe(YFINANCE_TICKER, interval="1h", range_="7d")
     df_m15 = fetch_ohlcv_safe(YFINANCE_TICKER, interval="15m", range_="5d")
     df_m5 = fetch_ohlcv_safe(YFINANCE_TICKER, interval="5m", range_="1d")
@@ -1333,7 +1334,7 @@ def run_bot_cycle():
         ai_commentary = generate_ai_analysis(signal)
         msg = format_signal_output(signal, ai_commentary)
 
-        if send_telegram_msg_with_button(CHAT_ID, msg):
+        if CHAT_ID and send_telegram_msg_with_button(CHAT_ID, msg):
             logging.info(f"🚀 Signal Broadcasted: {signal.get('signal_type')} | Score: {signal.get('score')}")
             last_processed_signal_id = signal_id
             
@@ -1350,21 +1351,30 @@ def run_bot_cycle():
                 "pnl": 0.0
             })
 
-
+# ==========================================
+# 18. MAIN ENTRY POINT
+# ==========================================
 def main():
-    logging.info("🤖 AI ICT/SMC Dual Entry Signal Bot Engine (MT5 Powered) Started!")
+    logging.info("🤖 AI ICT/SMC Telegram Signal Bot Engine Started!")
 
-    # បើកការភ្ជាប់ MT5 ដំបូង
+    # 1. ភ្ជាប់ MT5 (ប្រសិនបើមាន)
     init_mt5_connection()
 
+    # 2. បើក Web Server Flask Thread សម្រាប់ Render Port
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    # 3. បើក Telegram Listener Thread
     listener_thread = threading.Thread(target=telegram_poll_listener, daemon=True)
     listener_thread.start()
 
-    send_telegram_msg_with_button(
-        CHAT_ID, 
-        "🤖 *Institutional AI ICT/SMC Telegram Signal Bot upgraded to MT5 and online!*"
-    )
+    if CHAT_ID:
+        send_telegram_msg_with_button(
+            CHAT_ID, 
+            "🤖 *Institutional AI ICT/SMC Telegram Signal Bot is online & monitoring!*"
+        )
 
+    # 4. Main Bot Cycle Loop
     while True:
         try:
             run_bot_cycle()
@@ -1372,7 +1382,6 @@ def main():
             logging.error(f"Loop Exception: {e}")
 
         time.sleep(CHECK_INTERVAL_SECONDS)
-
 
 if __name__ == "__main__":
     main()
