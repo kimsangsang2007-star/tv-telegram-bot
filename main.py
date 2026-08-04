@@ -19,8 +19,10 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-BOT_TOKEN = "8684494688:AAGc1zpMs_POn4Bd0J_Pb5UuVSQjJjfK_To"
-CHAT_ID = "-1004327947082"
+import os
+
+# ទាញយក Token ចេញពី Environment Variable លើ Render ដោយសុវត្ថិភាព
+TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"
 
 SYMBOL_NAME = "XAUUSD (Gold)"
