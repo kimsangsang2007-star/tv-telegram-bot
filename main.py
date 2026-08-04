@@ -1,4 +1,5 @@
-import time
+import os
+importt time
 import json
 import logging
 import requests
@@ -17,8 +18,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler()]
 )
-
-import os
 
 # ទាញយក Token ចេញពី Environment Variable លើ Render ដោយសុវត្ថិភាព
 TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN")
